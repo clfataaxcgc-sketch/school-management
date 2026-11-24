@@ -1,0 +1,76 @@
+# One-command deployment of the whole SaaS: ONE MongoDB, ONE API server
+# (with Socket.IO) and the built React app served by nginx. All schools share
+# these three containers; each school's data is separated by schoolId.
+#
+# First run:
+#   1. cp server/.env.example server/.env
+#      and set JWT_SECRET to a random string of 32+ characters
+#      (for example:  openssl rand -hex 32)
+#   2. docker compose up --build -d
+#   3. Create the platform owner account (once):
+#        docker compose run --rm \
+#          -e PLATFORM_OWNER_EMAIL=owner@example.com \
+#          -e PLATFORM_OWNER_PASSWORD='choose-a-strong-password' \
+#          server node utils/createPlatformOwner.js
+#   4. Only if you upgrade an OLD single-school database (one time, back it up first):
+#        docker compose run --rm server node utils/migrateToMultiTenant.js
+#   5. App: http://localhost:8080   API: http://localhost:5000
+#
+# For a real production deployment put a domain + HTTPS in front of this
+# (reverse proxy or cloud load balancer), set CLIENT_URL / VITE_API_URL to your
+# real URLs, and consider a managed MongoDB instead of the bundled one.
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    # No "ports:" on purpose - the database is only reachable from the other
+    # containers, never from the internet. To inspect it locally, temporarily
+    # add:   ports: ["127.0.0.1:27017:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  server:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    env_file:
+      - ./server/.env
+    environment:
+      # These override server/.env so the containers always find each other.
+      MONGO_URI: mongodb://mongo:27017/school-management
+      NODE_ENV: production
+      # Must be the address the browser uses for the React app (CORS + cookies)
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:8080}
+    ports:
+      - "5000:5000"
+    volumes:
+      # Private per-school uploads persist across rebuilds
+      - uploads-data:/app/uploads
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:5000/api}
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "8080:80"
+
+volumes:
+  mongo-data:
+  uploads-data:
